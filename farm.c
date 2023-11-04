@@ -88,6 +88,7 @@ static void *worker(void* args){
     size_t size;
     long res;
     int n_long;
+    
     //BQueue_t *q = ((threadArgs_t*)args)->q;
     
     char* el = pop(taskqueue);
@@ -115,10 +116,30 @@ static void *worker(void* args){
     for(int i = 0; i < n_long; i++){
         res += i*buff[i];
     }
-    resType_t r;
-    r.filename = el;
-    r.result = res;
+    
+    /* mando il risultato al collector tramite la socket*/
+    int* fd_skt = (int*) args;
+    size_t namelen = strlen(el);
+    LOCK(&lock);
+    if(writen((long)*fd_skt, &res, sizeof(long)) == -1){
+        UNLOCK(&lock);
+        perror("write result");
+        exit(EXIT_FAILURE);
+    }
+    if(writen((long)*fd_skt, &namelen, sizeof(size_t)) == -1){
+        UNLOCK(&lock);
+        perror("write result");
+        exit(EXIT_FAILURE);
+    }
+    if(writen((long)*fd_skt, &el, namelen) == -1){
+        UNLOCK(&lock);
+        perror("write result");
+        exit(EXIT_FAILURE);
+    }
+    UNLOCK(&lock);
+
     printf("%ld\n", res);
+    exit(EXIT_SUCCESS);
 }
 
 void processdir(char* dirpath){
@@ -129,7 +150,7 @@ void processdir(char* dirpath){
 int isRegular(const char filename[]){
     struct stat statbuf;
 
-    if(stat(filename, &statbuf) == 0){
+    if((stat(filename, &statbuf)) == 0){
         if(S_ISREG(statbuf.st_mode)){    
             return 1;
         }
@@ -140,8 +161,9 @@ int isRegular(const char filename[]){
 int isDir(const char filename[]){
     struct stat statbuf;
 
-    if((stat(filename, &statbuf)) == 0)    
+    if((stat(filename, &statbuf)) == 0){    
         if(S_ISDIR(statbuf.st_mode)) return 1;
+    }
     else return 0;
 }
 
@@ -230,11 +252,23 @@ int main(int argc, char *argv[]){
     }
     else{
         /*----------COLLECTOR----------*/
-        int fd_c, notused;
+        int fd_c, notused, fd_skt;
+        long res;
+        char* filename;
+        size_t namelen;
         EF(fd_skt = socket(AF_UNIX, SOCK_STREAM, 0), "socket");
         EF(notused = bind(fd_skt, (struct sockaddr *)&sa, sizeof(sa)), "bind");
         EF((notused = listen(fd_skt, SOMAXCONN)), "listen");
         EF((fd_c = accept(fd_skt, NULL, 0)), "accept");
+        /*lettura dalla socket*/
+        EF(readn(fd_c, &res, sizeof(long)), "read result");
+        EF(readn(fd_c, &namelen, sizeof(size_t)), "read name lenght");
+        filename = malloc(namelen + 1);
+        EF(readn(fd_c, &filename, namelen+1), "read file name");
+
+        printf("%s: %ld", filename, res);
+        fflush(stdout);        
+
     }
 
     
