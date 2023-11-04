@@ -14,12 +14,17 @@
 #include "conn.h"
 #include "util.h"
 
-#define SOCKNAME "farm.sck"
+//#define SOCKNAME "farm.sck"
 #define UNIX_PATH_MAX 108
+#define EF(s, m)                                                               \
+  if ((s) == -1) {                                                             \
+    perror(m);                                                                 \
+    exit(EXIT_FAILURE);                                                        \
+  }
 
 BQueue_t* taskqueue;
 struct sockaddr_un sa;
-
+pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
 //socket per comunicazione con Collector, passo il socket ai thread? oppure struttura con riferimento alla coda e alla socket 
 
 /*typedef struct threadArgs{
@@ -37,8 +42,44 @@ typedef struct resType{
     long result;
 } resType_t;
 
+typedef struct Queue{
+    resType_t res;
+    struct Queue* next;
+}Queue_t;
+
 void cleanup() {
     unlink(SOCKNAME);
+}
+
+/**
+ * @brief inserimento ordinato nella coda di risultati del collector
+ * 
+ * @param t puntatore alla testa della coda
+ * @param val risultato da inserire
+ */
+
+void insert(Queue_t** t, resType_t val){
+    Queue_t* newres = (Queue_t*)malloc(sizeof(Queue_t));
+    newres->res = val;
+    newres->next = NULL;
+
+    Queue_t* curr = *t;
+    Queue_t* prev = NULL;
+
+    while(curr != NULL && curr->res.result > val.result){
+        prev = curr;
+        curr = curr->next;
+    }
+
+    if(prev == NULL){
+        newres->next = *t;
+        *t = newres;
+    }
+    else{
+        prev->next = newres;
+        newres->next = curr;
+    }
+    
 }
 
 static void *worker(void* args){
@@ -98,8 +139,9 @@ int isRegular(const char filename[]){
 
 int isDir(const char filename[]){
     struct stat statbuf;
-    
-    if(S_ISDIR(statbuf.st_mode)) return 1;
+
+    if((stat(filename, &statbuf)) == 0)    
+        if(S_ISDIR(statbuf.st_mode)) return 1;
     else return 0;
 }
 
@@ -109,10 +151,11 @@ int main(int argc, char *argv[]){
         return -1;
     }
     strncpy(sa.sun_path, SOCKNAME, UNIX_PATH_MAX);
-    int nThreads = 4;
-    int qLen = 8;
-    int delay = 0;
-    int opt;
+    int fd_skt,
+        nThreads = 4,
+        qLen = 8,
+        delay = 0,
+        opt;
 
     while((opt = getopt(argc, argv, "n:q:t:")) != -1){
         switch (opt){
@@ -133,11 +176,17 @@ int main(int argc, char *argv[]){
     pid = fork();
 
     if(pid != 0){
-        //MasterWorker
+        /*--------MASTERWORKER--------*/
         
         fflush(stdout);
         taskqueue = initBQueue(qLen);
-          
+        EF((fd_skt = socket(AF_UNIX, SOCK_STREAM, 0)), "socket client");
+        while(connect(fd_skt, (struct sockaddr*) &sa, sizeof(sa)) == -1){
+            if(errno == ENOENT)
+                sleep(1);
+            else 
+                exit(EXIT_FAILURE);
+        }
         pthread_t* workers = malloc(nThreads*sizeof(pthread_t)); 
         //threadArgs_t args;      
         if(!workers){
@@ -146,7 +195,7 @@ int main(int argc, char *argv[]){
         }
         for(int i = 0; i < nThreads; i++){
             fflush(stdout);
-            if(pthread_create(&workers[i], NULL, &worker, NULL) == -1){
+            if(pthread_create(&workers[i], NULL, &worker, &fd_skt) == -1){
                 perror("thread create");
                 exit(EXIT_FAILURE);
             }
@@ -168,10 +217,8 @@ int main(int argc, char *argv[]){
                 }
             }*/
             if(isRegular(argv[i])){
-                if(push(taskqueue, argv[i]) == -1){
-                    perror("push");
-                    exit(EXIT_FAILURE);
-                }
+                EF(push(taskqueue, argv[i]), "push");
+                //gestire la terminazione delle cose?
             }else{
                 perror("file non regolare");
                 //gestire la terminazione delle cose tipo
@@ -180,28 +227,14 @@ int main(int argc, char *argv[]){
         for (int i = 0; i < nThreads; i++) {
             pthread_join(workers[i], NULL);
         }
-    }else{
+    }
+    else{
         /*----------COLLECTOR----------*/
-        int fd_skt, fd_c, notused;
-        if((fd_skt = socket(AF_UNIX, SOCK_STREAM, 0)) == -1 ){
-            perror("creazione socket");
-            exit(EXIT_FAILURE);
-        }
-
-        if((notused = bind(fd_skt, (struct sockaddr *)&sa, sizeof(sa))) == -1){
-            perror("bind");
-            exit(EXIT_FAILURE);
-        }
-
-        if((notused = listen(fd_skt, SOMAXCONN)) == -1){
-            perror("listen");
-            exit(EXIT_FAILURE);
-        }
-
-        if((fd_c = accept(fd_skt, NULL, 0)) == -1){
-            perror("accept");
-            exit(EXIT_FAILURE);
-        }
+        int fd_c, notused;
+        EF(fd_skt = socket(AF_UNIX, SOCK_STREAM, 0), "socket");
+        EF(notused = bind(fd_skt, (struct sockaddr *)&sa, sizeof(sa)), "bind");
+        EF((notused = listen(fd_skt, SOMAXCONN)), "listen");
+        EF((fd_c = accept(fd_skt, NULL, 0)), "accept");
     }
 
     
