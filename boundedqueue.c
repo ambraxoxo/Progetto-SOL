@@ -70,8 +70,10 @@ void deleteBQueue(BQueue_t *q, void (*F)(void*)) {
 	return;
     }   
     if (F) {
-	void *data=NULL;
-	while((data = pop(q))) F(data);
+        void *data=NULL;
+        while((data = pop(q))){
+            F(data);            
+        } 
     }
     if (q->buf) free(q->buf);
     if (&q->m) pthread_mutex_destroy(&q->m);

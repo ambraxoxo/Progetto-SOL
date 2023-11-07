@@ -10,7 +10,7 @@
 #include <stdlib.h>
 #include <unistd.h>
 
-#define SOCKNAME     "./cs_sock"
+#define SOCKNAME     "farm.sck"
 #define MAXBACKLOG   32
 
 /** Evita letture parziali

@@ -14,7 +14,7 @@
 CC = gcc
 CFLAGS = -Wall -pedantic
 LDFLAGS = -lpthread
-objects = farm.o boundedqueue.o
+objects = farm.o boundedqueue.o 
 
 all: farm
 
@@ -28,4 +28,9 @@ boundedqueue.o: boundedqueue.c boundedqueue.h
 	$(CC) $(CFLAGS) -c boundedqueue.c
 
 clean:
-	rm -f farm $(objects)
+	rm -f farm $(objects) farm.sck
+
+run:
+	make clean
+	make 
+	./farm test -d dir
