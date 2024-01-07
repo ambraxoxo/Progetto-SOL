@@ -29,39 +29,47 @@ static inline void SignalConsumer(BQueue_t *q)     { SIGNAL(&q->cempty);}
 /* ------------------- interfaccia della coda ------------------ */
 
 BQueue_t *initBQueue(size_t n) {
-    BQueue_t *q = (BQueue_t*)calloc(sizeof(BQueue_t), 1);
-    if (!q) { perror("malloc"); return NULL;}
-    q->buf = calloc(sizeof(void*), n);
-    if (!q->buf) {
-	perror("malloc buf");
-	goto error;
-    }
-    if (pthread_mutex_init(&q->m,NULL) != 0) {
-	perror("pthread_mutex_init");
-	goto error;
-    }
-    if (pthread_cond_init(&q->cfull,NULL) != 0) {
-	perror("pthread_cond_init full");
-	goto error;
-    }
-    if (pthread_cond_init(&q->cempty,NULL) != 0) {
-	perror("pthread_cond_init empty");
-	goto error;
-    }
-    q->head  = q->tail = 0;
-    q->qlen  = 0;
-    q->qsize = n;
-    return q;
- error:
-    if (!q) return NULL; 
-    int myerrno = errno;
-    if (q->buf) free(q->buf);
-    if (&q->m) pthread_mutex_destroy(&q->m);
-    if (&q->cfull) pthread_cond_destroy(&q->cfull);
-    if (&q->cempty) pthread_cond_destroy(&q->cempty);
-    free(q);
-    errno = myerrno;
+  BQueue_t *q = (BQueue_t *)calloc(sizeof(BQueue_t), 1);
+  if (!q) {
+    perror("malloc");
     return NULL;
+  }
+  q->buf = calloc(sizeof(void *), n);
+  if (!q->buf) {
+    perror("malloc buf");
+    goto error;
+  }
+  if (pthread_mutex_init(&q->m, NULL) != 0) {
+    perror("pthread_mutex_init");
+    goto error;
+  }
+  if (pthread_cond_init(&q->cfull, NULL) != 0) {
+    perror("pthread_cond_init full");
+    goto error;
+  }
+  if (pthread_cond_init(&q->cempty, NULL) != 0) {
+    perror("pthread_cond_init empty");
+    goto error;
+  }
+  q->head = q->tail = 0;
+  q->qlen = 0;
+  q->qsize = n;
+  return q;
+error:
+  if (!q)
+    return NULL;
+  int myerrno = errno;
+  if (q->buf)
+    free(q->buf);
+  if (&q->m)
+    pthread_mutex_destroy(&q->m);
+  if (&q->cfull)
+    pthread_cond_destroy(&q->cfull);
+  if (&q->cempty)
+    pthread_cond_destroy(&q->cempty);
+  free(q);
+  errno = myerrno;
+  return NULL;
 }
 
 void deleteBQueue(BQueue_t *q, void (*F)(void*)) {
@@ -69,12 +77,21 @@ void deleteBQueue(BQueue_t *q, void (*F)(void*)) {
 	errno = EINVAL;
 	return;
     }   
-    if (F) {
+ /*   if (F) {
+        
         void *data=NULL;
         while((data = pop(q))){
             F(data);            
         } 
-    }
+    }*/
+   /* void *data=NULL;
+    printf("pup\n");
+        while((data = pop(q))){
+            printf("hello?\n");  
+            free(data);
+            
+            printf("%s\n", (char*)data);          
+        }*/
     if (q->buf) free(q->buf);
     if (&q->m) pthread_mutex_destroy(&q->m);
     if (&q->cfull) pthread_cond_destroy(&q->cfull);

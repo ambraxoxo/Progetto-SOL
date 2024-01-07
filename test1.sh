@@ -16,7 +16,7 @@ fi
 # generati nel seguito con il programma generafile
 #*   
 cat > expected.txt <<EOF
-64834211 file100.dat 
+64834211 file100.dat
 103453975 file2.dat
 153259244 file1.dat
 193031985 testdir/testdir2/file150.dat
