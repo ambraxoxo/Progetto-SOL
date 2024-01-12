@@ -1,11 +1,6 @@
-#include <stdlib.h>
-#include <assert.h>
-#include <pthread.h>
-#include <errno.h>
-#include <stdio.h>
 
 #include "util.h"
-#include "boundedqueue.h"
+
 
 /**
  * @file boundedqueue.c
