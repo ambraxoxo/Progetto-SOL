@@ -1,24 +1,33 @@
 #include "util.h"
+#include <stdio.h>
+#include <stdlib.h>
 
+//varaibili di stato modificate dal signal handler
 static volatile sig_atomic_t usr1 = 0;
 static volatile sig_atomic_t sign = 0;
+//delay e numero di thread generati default
 static int nThreads = 4;
-
-BQueue_t* taskqueue = NULL;
-struct sockaddr_un addr;
-pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
 static int delay = 0;
+//coda condivisa dai thread in cui il master mette i file da elaborare
+BQueue_t* taskqueue = NULL;
+//indirizzo della socket
+struct sockaddr_un addr;
+//lock usata dai thread per la comunicazione con il server
+pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
 
+//tipo risultato che usa il collector nella sua coda di risultati
 typedef struct resType{
     char* filename;
     long result;
 } resType_t;
 
+//tipo coda che utilizza il Collector
 typedef struct Queue{
     resType_t res;
     struct Queue* next;
 }Queue_t;
 
+//cleanup impostata atexit
 static void cleanup() {
     pthread_mutex_destroy(&lock);
     unlink(SOCKNAME);
@@ -35,10 +44,11 @@ static void sighandler(int sig){
 }
 
 /**
- * @brief inserimento ordinato nella coda di risultati del collector
+ * @brief funzione che viene chiamata alla fine del master (dopo che sono stati elaborati tutti i file o all'arrivo di un segnale != SIGUSR1) 
+            manda la terminazione ai thread, successivamente fa la join e chiude la connessione con il server e aspetta che termini
  * 
- * @param t puntatore alla testa della coda
- * @param val risultato da inserire
+ * @param workers array di thread worker
+ * @param fd_skt socket di comunicazione con il server
  */
 static void master_exit(pthread_t workers[], int* fd_skt){
     char end[] = "fine";
@@ -57,14 +67,23 @@ static void master_exit(pthread_t workers[], int* fd_skt){
     shutdown(*fd_skt, SHUT_RDWR);
     EF(close(*fd_skt), "socket close");
     deleteBQueue(taskqueue, NULL);
-        //unlink(SOCKNAME);
     int status;
     wait(&status);
     exit(EXIT_SUCCESS);
 
 }
+/**
+ * @brief inserimento ordinato nella coda di risultati del collector
+ * 
+ * @param t puntatore alla testa della coda
+ * @param val risultato da inserire
+ */
 static void insert(Queue_t** t, resType_t val){
     Queue_t* newres = (Queue_t*)malloc(sizeof(Queue_t));
+    if(newres == NULL){
+        perror("malloc newres");
+        exit(EXIT_FAILURE);
+    }
     newres->res = val;
     newres->next = NULL;
 
@@ -87,6 +106,7 @@ static void insert(Queue_t** t, resType_t val){
     
 }
 
+
 static void printQueue(Queue_t** t){
     Queue_t* curr = *t;
     while(curr != NULL){
@@ -107,7 +127,11 @@ static void freeQueue(Queue_t** t){
 }
 
 
-
+/**
+ * @brief funzione eseguita dai thread
+ * 
+ * @param args socket per la comunicazione con il collector
+ */
 static void *worker(void* args){
     fflush(stdout);
     struct stat statbuf;
@@ -116,84 +140,84 @@ static void *worker(void* args){
     int n_long;
     int* fd_skt = (int*) args;
     
-    //BQueue_t *q = ((threadArgs_t*)args)->q;
     while(1){
+        //pop dalla coda dei task dell'elemento su cui operare
         char* el = pop(taskqueue);
-        
-        //printf("%s\n", el);
-        //fflush(stdout);
         if(el == NULL){
             printf("pop\n");
-            return (void*)EXIT_FAILURE;
+            pthread_exit(NULL);
         }
-
+        //"fine" è il messaggio che sono finiti i file quindi esco
         if(strcmp(el, "fine") == 0){
-            return EXIT_SUCCESS;
+            break;
         }        
-        
+        //controllo se il file è regolare
         if(stat(el, &statbuf) == 0){
             size = statbuf.st_size;
             if(!S_ISREG(statbuf.st_mode)){
-                break;
+                pthread_exit(NULL);
             }
         }
 
-
         FILE* file; 
+        //size è la lunghezza del file in byte quindi ci sono size/8 long (long 8 byte)  
         n_long = size/8;
         long buff[n_long];
         if((file = fopen(el, "r")) == NULL){
-            printf("%s", el);
             perror("fopen");
-            return (void*)EXIT_FAILURE;
+            pthread_exit(NULL);
         }
+        //leggo tutto il file e lo metto nel buffer
         if(fread(buff, sizeof(long), n_long, file) == 0){
             printf("%s\n", el);
             perror("fread");
             fclose(file);
-            return (void*)EXIT_FAILURE;
+            pthread_exit(NULL);
         }
 
+        //operazione i*file[i]
         for(int i = 0; i < n_long; i++){
             res += i*buff[i];
         }
         
-        /* mando il risultato al collector tramite la socket*/
+        /* mando il risultato al collector tramite la socket nel formato risultato, lunghezza nome file, nome file*/
         int namelen = strlen(el);
 
         LOCK(&lock);
         if(writen((long)*fd_skt, &res, sizeof(long)) == -1){
             UNLOCK(&lock);
             perror("write result");
-            return (void*)EXIT_FAILURE;
+            pthread_exit(NULL);
         }
 
         if(writen((long)*fd_skt, &namelen, sizeof(int)) == -1){
             UNLOCK(&lock);
             perror("write result");
-            return (void*)EXIT_FAILURE;
+            pthread_exit(NULL);
         }
 
         if(writen((long)*fd_skt, (void*)el, sizeof(char)*namelen) == -1){
             UNLOCK(&lock);
             perror("write result");
-            return (void*)EXIT_FAILURE;
+            pthread_exit(NULL);
         }
         UNLOCK(&lock);
-        //free(el);
         fclose(file);
         res = 0;
+        //libero il puntatore all'elemento una volta finito di lavorarci
         if(el!= NULL){
             free(el);
         } 
         
     }
-    
-    //printf("%ld\n", res);
     pthread_exit(NULL);
 }
 
-
+/**
+ * @brief funzione che processa la directory passata come argomento
+ * 
+ * @param dirpath path della directory
+ */
 static void processdir(const char* dirpath){
     DIR* d = opendir(dirpath);
     struct dirent* file;
@@ -201,12 +225,14 @@ static void processdir(const char* dirpath){
         perror("apertura dir");
         return;
     }
-
+    
+    //controlla ogni elemento della directory
     while((errno = 0, file = readdir(d)) != NULL){
         if (strcmp(file->d_name, ".") == 0 || strcmp(file->d_name, "..") == 0) {
-            continue; // Skip "." and ".." entries
+            continue;
         }
 
+        //aggiorna il path dell'elemento che diventa path_corrente/nomefile
         char path[255];
         if((strlen(file->d_name) + strlen(dirpath) + 1) < 255){
             strncpy(path, dirpath, 255);
@@ -220,10 +246,16 @@ static void processdir(const char* dirpath){
             return;
         }
 
+        //se l'elemento della directory è un'altra directory richiamo la funzione ricorsivamente con il nuovo path
         if (file->d_type == DT_DIR) {
             processdir(path);
         } else {
+            //altrimenti è un file quindi alloco un puntatore per il path del file e lo metto nella coda
             char* pushFile = (char*)malloc((strlen(path)+1));
+            if(pushFile == NULL){
+                perror("malloc pushFile");
+                exit(EXIT_FAILURE);
+            }
             strncpy(pushFile, path, strlen(path)+1);
             push(taskqueue, (void*)pushFile);
             sleep(delay);
@@ -257,6 +289,10 @@ int main(int argc, char *argv[]){
         printf("Uso: %s [file list]", argv[0]);
         return -1;
     }
+    
+    unlink(SOCKNAME);
+
+    //inizializzo l'indirizzo a "farm.sck"
     strncpy(addr.sun_path, SOCKNAME, UNIX_PATH_MAX);
     addr.sun_family = AF_UNIX;
     atexit(cleanup);
@@ -266,25 +302,7 @@ int main(int argc, char *argv[]){
         opt;
     
     char* dir = NULL;
-    
-    while((opt = getopt(argc, argv, "n:q:t:d:")) != -1){
-        switch (opt){
-        case 'n':
-            nThreads = atoi(optarg);
-            break;
-        case 'q':
-            qLen = atoi(optarg);
-            break;
-        case 't':
-            delay = atoi(optarg)/1000;
-            break;   
-        case 'd':
-            dir = optarg;
-            break;      
-        default:
-            break;
-        }
-    }
+    //creo la maschera per i segnali da gestire
     sigset_t mask, oldmask;
     sigemptyset(&mask);        // resetto tutti i bits
     sigaddset(&mask, SIGINT); 
@@ -303,21 +321,44 @@ int main(int argc, char *argv[]){
     EF(sigaction(SIGQUIT, &sa, NULL), "handler install");
     EF(sigaction(SIGTERM, &sa, NULL), "handler install");
     EF(sigaction(SIGUSR1, &sa, NULL), "handler install");
-    EF(pthread_sigmask(SIG_SETMASK, &oldmask, NULL), "ripristinare maschera");
+    EF(pthread_sigmask(SIG_SETMASK, &oldmask, NULL), "ripristinare maschera"); //ripristino la maschera
+
+    //prendo le opzioni passate da riga di comando con getopt
+    while((opt = getopt(argc, argv, "n:q:t:d:")) != -1){
+        switch (opt){
+        case 'n':
+            nThreads = atoi(optarg);
+            break;
+        case 'q':
+            qLen = atoi(optarg);
+            break;
+        case 't':
+            delay = atoi(optarg)/1000;
+            break;   
+        case 'd':
+            dir = optarg;
+            break;      
+        default:
+            break;
+        }
+    }
     int pid;
     EF(pid = fork(), "fork");
     if(pid != 0){
         /*--------MASTERWORKER--------*/
+        //blocco SIGUSR1
         sigset_t mw_mask;
         sigemptyset(&mw_mask);
         sigaddset(&mw_mask, SIGUSR1);
         EF(pthread_sigmask(SIG_BLOCK, &mw_mask, NULL), "maschera mw");
+
         fflush(stdout);
         taskqueue = initBQueue(qLen);
         if(!taskqueue){
             perror("initBqueue");
             exit(EXIT_FAILURE);
         }
+        //inizializzo la socket e mi connetto al server
         EF((fd_skt = socket(AF_UNIX, SOCK_STREAM, 0)), "socket client");
         while(connect(fd_skt, (struct sockaddr*) &addr, sizeof(addr)) == -1){
             if(errno == ENOENT || errno == ECONNREFUSED)
@@ -327,7 +368,7 @@ int main(int argc, char *argv[]){
                 exit(EXIT_FAILURE);
             }
         }
-        
+        //inizializzo i thread
         pthread_t workers[nThreads];
         for(int i = 0; i < nThreads; i++){
             fflush(stdout);
@@ -337,6 +378,7 @@ int main(int argc, char *argv[]){
             }
             
         }
+        //se è stata passata una directory come argomento la processo
         if(dir != NULL){
             if(isDir(dir)){
                 if(sign) master_exit(workers, &fd_skt);
@@ -347,11 +389,19 @@ int main(int argc, char *argv[]){
                 exit(EXIT_FAILURE);
             }
         }
+        //quando getopt ritorna -1, optdint punta al primo elemento che non è un'opzione quindi se optind != 0 
+        //significa che ci sono dei file da inserire nella coda
         if(optind != 0){
             for(int i = optind; i < argc; i++){
+                //ad ogni iterazione controlla se è arrivato un segnale
                 if(sign) master_exit(workers, &fd_skt);
+                //se è il nome di un file regolare alloca un puntatore e lo inserisce nella coda
                 if(isRegular(argv[i])){
                     char* file = (char*)malloc(strlen(argv[i])+1);
+                    if(file == NULL){
+                        perror("malloc nome file");
+                        exit(EXIT_FAILURE);
+                    }
                     strncpy(file, argv[i], strlen(argv[i])+1);
                     EF(push(taskqueue, (void*)file), "push");
                     sleep(delay);
@@ -366,15 +416,24 @@ int main(int argc, char *argv[]){
     }
     else{
         /*----------COLLECTOR----------*/
+        //maschero tutti i segnali tranne SIGUSR1
+        sigset_t c_mask;
+        sigemptyset(&c_mask);
+        sigaddset(&c_mask, SIGINT); 
+        sigaddset(&c_mask, SIGHUP);
+        sigaddset(&c_mask, SIGQUIT);
+        sigaddset(&c_mask, SIGTERM);
+        EF(pthread_sigmask(SIG_BLOCK, &c_mask, NULL), "maschera collector");
+
         Queue_t* codaRes = NULL;
         resType_t result;
         int fd_c, notused;
         long res;
         char* filename;
         int namelen;
-        int a;
         int serv_sock;
         
+        //inizializzo la socket bindo l'indirizzo mi metto in ascolto e accetto la connessione con il client
         EF(serv_sock = socket(AF_UNIX, SOCK_STREAM, 0), "socket");
         EF(notused = bind(serv_sock, (struct sockaddr *)&addr, sizeof(addr)), "bind server");
         EF((notused = listen(serv_sock, SOMAXCONN)), "listen");
@@ -382,19 +441,25 @@ int main(int argc, char *argv[]){
 
         //lettura dalla socket
         while(1){
+            //ad ogni iterazione controllo usr1
             if(usr1){
                 printQueue(&codaRes);
                 usr1 = 0;
             }
-
+            //legge prima il long contenente il risultato
             EF(readn(fd_c, &res, sizeof(long)), "read result");
-
+            //significa che ha finito
             if(res == -1) break;
 
             EF(readn(fd_c, &namelen, sizeof(int)), "read name lenght");
             filename = malloc(sizeof(char)*(namelen + 1));
-            EF((a = readn(fd_c, (void*)filename, namelen*sizeof(char))), "read file name");
+            if(filename == NULL){
+                perror("malloc nome file");
+                exit(EXIT_FAILURE);
+            }
+            EF((readn(fd_c, (void*)filename, namelen*sizeof(char))), "read file name");
             filename[namelen] = '\0';
+            //inserisce il risulato nella coda
             result.filename = filename;
             result.result = res;
             insert(&codaRes, result);

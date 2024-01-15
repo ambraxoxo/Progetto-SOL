@@ -104,3 +104,13 @@ if [[ $? != 0 ]]; then
 else
     echo "test5 passed"
 fi
+
+# verifica sigusr1
+./farm -n 1 -d testdir -q 1 -t 1000 file* | grep "file*" | awk '{print $1,$2}' | diff - expected.txt 
+sleep 5
+pkill -SIGUSR1 farm
+if [[ $? != 0 ]]; then
+    echo "test sigusr1 failed"
+else
+    echo "test sigusr1 passed"
+fi
